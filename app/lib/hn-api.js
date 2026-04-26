@@ -38,7 +38,7 @@ export function resolveUserId() {
   if (typeof window === "undefined") return "guest";
   const current = localStorage.getItem("hn-wrapper-user");
   if (current) return current;
-  const id = `user-${Math.random().toString(36).slice(2, 10)}`;
+  const id = `user-${crypto.randomUUID()}`;
   localStorage.setItem("hn-wrapper-user", id);
   return id;
 }
