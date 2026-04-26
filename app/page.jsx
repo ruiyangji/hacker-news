@@ -17,6 +17,12 @@ const TTL = {
   feedIds: 5 * 60 * 1000,
   item: 10 * 60 * 1000,
 };
+const LOCAL_STORE_KEY = "hn-wrapper-static-store-v1";
+const BASE_LISTS = [
+  { id: "bookmarks", name: "Bookmarks", system: true },
+  { id: "read-later", name: "Read Later", system: true },
+];
+let wrapperBackendMode = "unknown";
 
 function cacheGet(key, maxAgeMs) {
   if (typeof window === "undefined") return null;
@@ -49,7 +55,13 @@ function resolveUserId() {
 
 async function fetchJson(url, init) {
   const res = await fetch(url, init);
-  const data = await res.json();
+  const raw = await res.text();
+  let data = null;
+  try {
+    data = raw ? JSON.parse(raw) : null;
+  } catch {
+    data = null;
+  }
   if (!res.ok) throw new Error(data?.error || `Request failed: ${res.status}`);
   return data;
 }
@@ -86,6 +98,259 @@ async function fetchItemsInChunks(ids, chunkSize = 40) {
     all.push(...rows.filter(Boolean));
   }
   return all;
+}
+
+function createEmptyLocalStore() {
+  return { users: {}, posts: [], comments: [] };
+}
+
+function readLocalStore() {
+  if (typeof window === "undefined") return createEmptyLocalStore();
+  try {
+    const raw = localStorage.getItem(LOCAL_STORE_KEY);
+    if (!raw) return createEmptyLocalStore();
+    const parsed = JSON.parse(raw);
+    return {
+      users: parsed.users ?? {},
+      posts: parsed.posts ?? [],
+      comments: parsed.comments ?? [],
+    };
+  } catch {
+    return createEmptyLocalStore();
+  }
+}
+
+function writeLocalStore(store) {
+  if (typeof window === "undefined") return;
+  localStorage.setItem(LOCAL_STORE_KEY, JSON.stringify(store));
+}
+
+function ensureLocalUser(store, userId) {
+  if (!store.users[userId]) {
+    store.users[userId] = {
+      lists: BASE_LISTS.map((l) => ({ ...l, createdAt: Date.now() })),
+      listItems: {},
+    };
+  }
+  const user = store.users[userId];
+  if (!Array.isArray(user.lists)) user.lists = [];
+  if (!user.listItems || typeof user.listItems !== "object") user.listItems = {};
+  for (const base of BASE_LISTS) {
+    if (!user.lists.some((l) => l.id === base.id)) {
+      user.lists.push({ ...base, createdAt: Date.now() });
+    }
+  }
+  return user;
+}
+
+async function withWrapperBackend(apiCall, localFallback) {
+  if (wrapperBackendMode === "local") return localFallback();
+  try {
+    const result = await apiCall();
+    wrapperBackendMode = "api";
+    return result;
+  } catch {
+    wrapperBackendMode = "local";
+    return localFallback();
+  }
+}
+
+async function wrapperListLists(userId) {
+  return withWrapperBackend(
+    async () => {
+      const data = await fetchJson(`/api/lists?userId=${encodeURIComponent(userId)}`);
+      return data.lists;
+    },
+    async () => {
+      const store = readLocalStore();
+      const user = ensureLocalUser(store, userId);
+      writeLocalStore(store);
+      return user.lists.map((list) => ({ ...list, count: (user.listItems[list.id] ?? []).length }));
+    },
+  );
+}
+
+async function wrapperCreateList(userId, name) {
+  return withWrapperBackend(
+    async () => {
+      const data = await fetchJson("/api/lists", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ userId, name }),
+      });
+      return data.list;
+    },
+    async () => {
+      const normalized = name.trim();
+      if (!normalized) throw new Error("List name is required.");
+      const store = readLocalStore();
+      const user = ensureLocalUser(store, userId);
+      const list = { id: `list-${Date.now()}`, name: normalized, system: false, createdAt: Date.now() };
+      user.lists.push(list);
+      writeLocalStore(store);
+      return list;
+    },
+  );
+}
+
+async function wrapperListItems(userId, listId) {
+  return withWrapperBackend(
+    async () => {
+      const data = await fetchJson(`/api/lists/${encodeURIComponent(listId)}/items?userId=${encodeURIComponent(userId)}`);
+      return data.items;
+    },
+    async () => {
+      const store = readLocalStore();
+      const user = ensureLocalUser(store, userId);
+      writeLocalStore(store);
+      return user.listItems[listId] ?? [];
+    },
+  );
+}
+
+async function wrapperAddListItem(userId, listId, story) {
+  return withWrapperBackend(
+    async () => {
+      const data = await fetchJson(`/api/lists/${encodeURIComponent(listId)}/items`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ userId, story }),
+      });
+      return data.item;
+    },
+    async () => {
+      const store = readLocalStore();
+      const user = ensureLocalUser(store, userId);
+      if (!user.listItems[listId]) user.listItems[listId] = [];
+      const next = {
+        id: String(story.id),
+        title: story.title ?? "Untitled",
+        url: story.url ?? null,
+        by: story.by ?? "unknown",
+        time: story.time ?? Math.floor(Date.now() / 1000),
+        score: story.score ?? 0,
+        descendants: story.descendants ?? 0,
+      };
+      user.listItems[listId] = [next, ...user.listItems[listId].filter((i) => String(i.id) !== String(story.id))];
+      writeLocalStore(store);
+      return next;
+    },
+  );
+}
+
+async function wrapperRemoveListItem(userId, listId, storyId) {
+  return withWrapperBackend(
+    async () => {
+      await fetchJson(`/api/lists/${encodeURIComponent(listId)}/items`, {
+        method: "DELETE",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ userId, storyId }),
+      });
+      return true;
+    },
+    async () => {
+      const store = readLocalStore();
+      const user = ensureLocalUser(store, userId);
+      user.listItems[listId] = (user.listItems[listId] ?? []).filter((i) => String(i.id) !== String(storyId));
+      writeLocalStore(store);
+      return true;
+    },
+  );
+}
+
+async function wrapperListPosts() {
+  return withWrapperBackend(
+    async () => {
+      const data = await fetchJson("/api/posts");
+      return data.posts;
+    },
+    async () => {
+      const store = readLocalStore();
+      return [...store.posts].sort((a, b) => b.createdAt - a.createdAt);
+    },
+  );
+}
+
+async function wrapperCreatePost(userId, payload) {
+  return withWrapperBackend(
+    async () => {
+      const data = await fetchJson("/api/posts", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ userId, ...payload }),
+      });
+      return data.post;
+    },
+    async () => {
+      const title = String(payload?.title ?? "").trim();
+      const url = String(payload?.url ?? "").trim();
+      const text = String(payload?.text ?? "").trim();
+      if (!title) throw new Error("Post title is required.");
+      if (!url && !text) throw new Error("Provide a URL or post text.");
+      const store = readLocalStore();
+      const post = {
+        id: `wrapper-post-${Date.now()}`,
+        type: "wrapper-post",
+        title,
+        url: url || null,
+        text: text || null,
+        by: userId,
+        score: 1,
+        descendants: 0,
+        time: Math.floor(Date.now() / 1000),
+        createdAt: Date.now(),
+      };
+      store.posts.unshift(post);
+      writeLocalStore(store);
+      return post;
+    },
+  );
+}
+
+async function wrapperListComments(storyId) {
+  return withWrapperBackend(
+    async () => {
+      const data = await fetchJson(`/api/comments?storyId=${encodeURIComponent(storyId)}`);
+      return data.comments;
+    },
+    async () => {
+      const store = readLocalStore();
+      return store.comments
+        .filter((c) => String(c.storyId) === String(storyId))
+        .sort((a, b) => b.createdAt - a.createdAt);
+    },
+  );
+}
+
+async function wrapperCreateComment(userId, input) {
+  return withWrapperBackend(
+    async () => {
+      const data = await fetchJson("/api/comments", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ userId, ...input }),
+      });
+      return data.comment;
+    },
+    async () => {
+      const text = String(input?.text ?? "").trim();
+      if (!text) throw new Error("Comment text is required.");
+      const store = readLocalStore();
+      const comment = {
+        id: `wrapper-comment-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`,
+        type: "wrapper-comment",
+        storyId: String(input.storyId),
+        parentId: input.parentId ? String(input.parentId) : null,
+        text,
+        by: userId,
+        time: Math.floor(Date.now() / 1000),
+        createdAt: Date.now(),
+      };
+      store.comments.unshift(comment);
+      writeLocalStore(store);
+      return comment;
+    },
+  );
 }
 
 function domainOf(url) {
@@ -595,18 +860,28 @@ function DetailPanel({ story, onClose, userId, lists, onAddToList, onToggleBookm
     async function run() {
       if (!story) return;
       setLoading(true);
-      const localPromise = fetchJson(`/api/comments?storyId=${encodeURIComponent(story.id)}`).then((d) => d.comments);
-      const hnPromise = (async () => {
-        if (!Array.isArray(story.kids) || story.kids.length === 0) return [];
-        const ids = story.kids.slice(0, 25);
-        const raw = await Promise.all(ids.map((id) => fetchItem(id)));
-        return raw.filter((item) => item && !item.dead && !item.deleted);
-      })();
-      const [local, hn] = await Promise.all([localPromise, hnPromise]);
-      if (!cancelled) {
-        setWrapperComments(local);
-        setHnComments(hn);
-        setLoading(false);
+      try {
+        const localPromise = wrapperListComments(story.id);
+        const hnPromise = (async () => {
+          if (!Array.isArray(story.kids) || story.kids.length === 0) return [];
+          const ids = story.kids.slice(0, 25);
+          const raw = await Promise.all(ids.map((id) => fetchItem(id)));
+          return raw.filter((item) => item && !item.dead && !item.deleted);
+        })();
+        const [local, hn] = await Promise.all([localPromise, hnPromise]);
+        if (!cancelled) {
+          setWrapperComments(local);
+          setHnComments(hn);
+        }
+      } catch {
+        if (!cancelled) {
+          setWrapperComments([]);
+          setHnComments([]);
+        }
+      } finally {
+        if (!cancelled) {
+          setLoading(false);
+        }
       }
     }
     run();
@@ -645,19 +920,14 @@ function DetailPanel({ story, onClose, userId, lists, onAddToList, onToggleBookm
     }
     if (!parentId) setCommentError("");
     try {
-      await fetchJson("/api/comments", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          userId,
-          storyId: String(story.id),
-          parentId,
-          text,
-        }),
+      await wrapperCreateComment(userId, {
+        storyId: String(story.id),
+        parentId,
+        text,
       });
       if (!parentId) setCommentText("");
-      const refreshed = await fetchJson(`/api/comments?storyId=${encodeURIComponent(story.id)}`);
-      setWrapperComments(refreshed.comments);
+      const refreshed = await wrapperListComments(story.id);
+      setWrapperComments(refreshed);
     } catch (e) {
       if (!parentId) setCommentError(e.message);
       throw e;
@@ -823,20 +1093,20 @@ export default function Page() {
   }, []);
 
   async function refreshLists(id) {
-    const data = await fetchJson(`/api/lists?userId=${encodeURIComponent(id)}`);
-    setLists(data.lists);
-    return data.lists;
+    const nextLists = await wrapperListLists(id);
+    setLists(nextLists);
+    return nextLists;
   }
 
   async function refreshListItems(id, listId) {
-    const data = await fetchJson(`/api/lists/${encodeURIComponent(listId)}/items?userId=${encodeURIComponent(id)}`);
-    setListItems((prev) => ({ ...prev, [listId]: data.items }));
-    return data.items;
+    const items = await wrapperListItems(id, listId);
+    setListItems((prev) => ({ ...prev, [listId]: items }));
+    return items;
   }
 
   async function refreshPosts() {
-    const data = await fetchJson("/api/posts");
-    setWrapperPosts(data.posts);
+    const posts = await wrapperListPosts();
+    setWrapperPosts(posts);
   }
 
   useEffect(() => {
@@ -969,21 +1239,13 @@ export default function Page() {
   const activeList = lists.find((list) => list.id === activeListId);
 
   async function addToList(listId, story) {
-    await fetchJson(`/api/lists/${encodeURIComponent(listId)}/items`, {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ userId, story }),
-    });
+    await wrapperAddListItem(userId, listId, story);
     await refreshLists(userId);
     await refreshListItems(userId, listId);
   }
 
   async function removeFromList(listId, storyId) {
-    await fetchJson(`/api/lists/${encodeURIComponent(listId)}/items`, {
-      method: "DELETE",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ userId, storyId }),
-    });
+    await wrapperRemoveListItem(userId, listId, storyId);
     await refreshLists(userId);
     await refreshListItems(userId, listId);
   }
@@ -1001,21 +1263,13 @@ export default function Page() {
   async function createList() {
     const name = newListName.trim();
     if (!name) return;
-    await fetchJson("/api/lists", {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ userId, name }),
-    });
+    await wrapperCreateList(userId, name);
     setNewListName("");
     await refreshLists(userId);
   }
 
   async function createPost(payload) {
-    await fetchJson("/api/posts", {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ userId, ...payload }),
-    });
+    await wrapperCreatePost(userId, payload);
     await refreshPosts();
   }
 
