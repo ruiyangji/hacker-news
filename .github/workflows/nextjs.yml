@@ -73,6 +73,11 @@ jobs:
             ${{ runner.os }}-nextjs-${{ hashFiles('**/package-lock.json', '**/yarn.lock') }}-
       - name: Install dependencies
         run: ${{ steps.detect-package-manager.outputs.manager }} ${{ steps.detect-package-manager.outputs.command }}
+      - name: Remove API routes (not compatible with static export)
+        # app/api and lib/backend-store.js require a Node.js server (filesystem writes).
+        # lib/ is only imported by app/api, so both can be safely removed for the
+        # static GitHub Pages build without affecting any page or component.
+        run: rm -rf app/api lib
       - name: Build with Next.js
         run: ${{ steps.detect-package-manager.outputs.runner }} next build
       - name: Upload artifact
