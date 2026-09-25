@@ -5,11 +5,17 @@ import {
   FEEDS,
   PER_PAGE,
   resolveUserId,
-  fetchJson,
   fetchFeedIds,
   fetchItem,
   fetchItemsInChunks,
   domainOf,
+  wrapperListLists,
+  wrapperListItems,
+  wrapperListPosts,
+  wrapperAddListItem,
+  wrapperRemoveListItem,
+  wrapperCreateList,
+  wrapperCreatePost,
 } from "./lib/hn-api";
 import { fieldStyle, secondaryButtonStyle } from "./components/styles";
 import Sidebar from "./components/Sidebar";
@@ -42,20 +48,20 @@ export default function Page() {
   }, []);
 
   async function refreshLists(id) {
-    const data = await fetchJson(`/api/lists?userId=${encodeURIComponent(id)}`);
-    setLists(data.lists);
-    return data.lists;
+    const nextLists = await wrapperListLists(id);
+    setLists(nextLists);
+    return nextLists;
   }
 
   async function refreshListItems(id, listId) {
-    const data = await fetchJson(`/api/lists/${encodeURIComponent(listId)}/items?userId=${encodeURIComponent(id)}`);
-    setListItems((prev) => ({ ...prev, [listId]: data.items }));
-    return data.items;
+    const items = await wrapperListItems(id, listId);
+    setListItems((prev) => ({ ...prev, [listId]: items }));
+    return items;
   }
 
   async function refreshPosts() {
-    const data = await fetchJson("/api/posts");
-    setWrapperPosts(data.posts);
+    const posts = await wrapperListPosts();
+    setWrapperPosts(posts);
   }
 
   useEffect(() => {
@@ -188,21 +194,13 @@ export default function Page() {
   const activeList = lists.find((list) => list.id === activeListId);
 
   async function addToList(listId, story) {
-    await fetchJson(`/api/lists/${encodeURIComponent(listId)}/items`, {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ userId, story }),
-    });
+    await wrapperAddListItem(userId, listId, story);
     await refreshLists(userId);
     await refreshListItems(userId, listId);
   }
 
   async function removeFromList(listId, storyId) {
-    await fetchJson(`/api/lists/${encodeURIComponent(listId)}/items`, {
-      method: "DELETE",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ userId, storyId }),
-    });
+    await wrapperRemoveListItem(userId, listId, storyId);
     await refreshLists(userId);
     await refreshListItems(userId, listId);
   }
@@ -220,21 +218,13 @@ export default function Page() {
   async function createList() {
     const name = newListName.trim();
     if (!name) return;
-    await fetchJson("/api/lists", {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ userId, name }),
-    });
+    await wrapperCreateList(userId, name);
     setNewListName("");
     await refreshLists(userId);
   }
 
   async function createPost(payload) {
-    await fetchJson("/api/posts", {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ userId, ...payload }),
-    });
+    await wrapperCreatePost(userId, payload);
     await refreshPosts();
   }
 

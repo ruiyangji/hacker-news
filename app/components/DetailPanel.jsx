@@ -1,7 +1,7 @@
 "use client";
 
 import { useState, useEffect, useMemo } from "react";
-import { fetchJson, fetchItem, domainOf, timeAgo } from "../lib/hn-api";
+import { fetchItem, domainOf, timeAgo, wrapperListComments, wrapperCreateComment } from "../lib/hn-api";
 import { fieldStyle, secondaryButtonStyle, primaryButtonStyle } from "./styles";
 import WrapperCommentNode from "./WrapperCommentNode";
 import HNCommentNode from "./HNCommentNode";
@@ -26,7 +26,7 @@ export default function DetailPanel({ story, onClose, userId, lists, onAddToList
     async function run() {
       if (!story) return;
       setLoading(true);
-      const localPromise = fetchJson(`/api/comments?storyId=${encodeURIComponent(story.id)}`).then((d) => d.comments);
+      const localPromise = wrapperListComments(story.id);
       const hnPromise = (async () => {
         if (!Array.isArray(story.kids) || story.kids.length === 0) return [];
         const ids = story.kids.slice(0, 25);
@@ -76,19 +76,14 @@ export default function DetailPanel({ story, onClose, userId, lists, onAddToList
     }
     if (!parentId) setCommentError("");
     try {
-      await fetchJson("/api/comments", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          userId,
-          storyId: String(story.id),
-          parentId,
-          text,
-        }),
+      await wrapperCreateComment(userId, {
+        storyId: String(story.id),
+        parentId,
+        text,
       });
       if (!parentId) setCommentText("");
-      const refreshed = await fetchJson(`/api/comments?storyId=${encodeURIComponent(story.id)}`);
-      setWrapperComments(refreshed.comments);
+      const refreshed = await wrapperListComments(story.id);
+      setWrapperComments(refreshed);
     } catch (e) {
       if (!parentId) setCommentError(e.message);
       throw e;
